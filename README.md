@@ -221,14 +221,14 @@ factor_registry.register(MyCustomFactor())
 
 ```bash
 # 数据库配置
-export DB_HOST=localhost
-export DB_PORT=5432
-export DB_USERNAME=atom
-export DB_PASSWORD=qwerasdf.
+export DB_HOST=
+export DB_PORT=
+export DB_USERNAME=
+export DB_PASSWORD=
 
 # 交易所API配置
-export EXCHANGE_BINANCE_API_KEY=EqvVTcMGGxQxxJEzWZTROzlHi36TG4Ms4vPKpbWJme0Od7YXWXvDEJCB5qQMU2Kf
-export EXCHANGE_BINANCE_SECRET=CTSgzqqTKVzu339JtnymErXTf4jUznSH3jpOS7tCaHFokBtdTvBmnMnBDKoRVqDs
+export EXCHANGE_BINANCE_API_KEY=
+export EXCHANGE_BINANCE_SECRET=
 
 # API服务配置
 export API_HOST=0.0.0.0
