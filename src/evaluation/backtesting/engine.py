@@ -5,7 +5,7 @@
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Any  # <- 加 Any
 from dataclasses import dataclass
 from enum import Enum
 from src.utils.logger import get_logger
@@ -60,6 +60,19 @@ class BacktestEngine:
         # 回测状态
         self.reset()
     
+    # 新增：安全提取标量为 float
+    @staticmethod
+    def _to_float_scalar(x: Any, default: float = np.nan) -> float:
+        try:
+            # 将标量/数组/Series 安全转为 float
+            arr = np.asarray(x)
+            if arr.size == 0:
+                return default
+            val = float(arr.ravel()[0])
+            return val
+        except Exception:
+            return default
+
     def reset(self):
         """重置回测状态"""
         self.current_cash = self.config.initial_capital
@@ -90,40 +103,49 @@ class BacktestEngine:
             if strategy_func is None:
                 strategy_func = self._simple_factor_strategy
             
-            # 重置回测状态
             self.reset()
-            
-            # 对齐因子值和价格数据
-            aligned_data = pd.concat([factor_values, price_data], axis=1).dropna()
-            
-            if aligned_data.empty or len(aligned_data) < 2:
+
+            # 规范化价格列名（全部小写），确保存在 close
+            if 'close' not in price_data.columns:
+                price_data = price_data.copy()
+                price_data.columns = [str(c).strip().lower() for c in price_data.columns]
+            if 'close' not in price_data.columns:
+                return {"error": "price_data 缺少 close 列"}
+
+            # 对齐数据，并将因子列强制命名为 factor，避免重名歧义
+            factor_series = factor_values.rename('factor')
+            aligned = pd.concat([factor_series, price_data], axis=1).dropna(subset=['factor', 'close'])
+            if aligned.empty or len(aligned) < 2:
                 return {"error": "数据不足进行回测"}
             
-            factor_col = aligned_data.columns[0]
-            
             # 逐日回测
-            for i, (timestamp, row) in enumerate(aligned_data.iterrows()):
+            for i, (timestamp, row) in enumerate(aligned.iterrows()):
                 if i == 0:
-                    # 初始化
                     self.timestamps.append(timestamp)
                     self.portfolio_values.append(self.config.initial_capital)
                     continue
                 
-                # 获取当前因子值和价格信息
-                current_factor = row[factor_col]
+                # 获取当前因子值和价格信息（全部转标量）
+                current_factor = self._to_float_scalar(row["factor"])
                 current_prices = {
-                    'open': row['open'],
-                    'high': row['high'], 
-                    'low': row['low'],
-                    'close': row['close'],
-                    'volume': row.get('volume', 0)
+                    # 使用 row.get，避免缺失列抛出 KeyError
+                    'open': self._to_float_scalar(row.get('open', np.nan)),
+                    'high': self._to_float_scalar(row.get('high', np.nan)),
+                    'low': self._to_float_scalar(row.get('low', np.nan)),
+                    'close': self._to_float_scalar(row.get('close', np.nan)),
+                    'volume': self._to_float_scalar(row.get('volume', 0.0), 0.0),
                 }
+                if not np.isfinite(current_factor) or not np.isfinite(current_prices['close']):
+                    self.timestamps.append(timestamp)
+                    self.portfolio_values.append(self.portfolio_values[-1])
+                    continue
                 
-                # 执行策略
-                signal = strategy_func(current_factor, current_prices, i)
+                # 执行策略并强制信号为标量
+                raw_signal = strategy_func(current_factor, current_prices, i)
+                signal = self._to_float_scalar(raw_signal, 0.0)
                 
                 # 执行交易
-                if signal != 0:
+                if signal != 0.0:
                     self._execute_trade("SYMBOL", signal, current_prices['close'], timestamp)
                 
                 # 更新投资组合价值
@@ -133,16 +155,15 @@ class BacktestEngine:
                 
                 # 计算收益率
                 if len(self.portfolio_values) > 1:
-                    daily_return = (portfolio_value - self.portfolio_values[-2]) / self.portfolio_values[-2]
-                    self.returns.append(daily_return)
+                    prev_val = self.portfolio_values[-2]
+                    daily_return = (portfolio_value - prev_val) / prev_val if prev_val != 0 else 0.0
+                    self.returns.append(float(daily_return))
             
-            # 生成回测结果
             return self._generate_backtest_results()
-            
         except Exception as e:
             self.logger.error(f"因子回测失败: {e}")
             return {"error": str(e)}
-    
+
     def run_quantile_backtest(
         self,
         factor_values: pd.Series,
@@ -163,93 +184,82 @@ class BacktestEngine:
             分层回测结果
         """
         try:
-            # 对齐数据
-            aligned_data = pd.concat([factor_values, price_data['close']], axis=1).dropna()
-            if len(aligned_data) < quantiles * 2:
+            # 规范化价格列名（全部小写），确保存在 close
+            if 'close' not in price_data.columns:
+                price_data = price_data.copy()
+                price_data.columns = [str(c).strip().lower() for c in price_data.columns]
+            if 'close' not in price_data.columns:
+                return {"error": "price_data 缺少 close 列"}
+
+            # 因子命名为 factor，避免与 close 重名导致 rename 冲突
+            factor_series = factor_values.rename('factor')
+            close_series = price_data['close'].rename('close')
+
+            # 对齐并去 NaN
+            aligned = pd.concat([factor_series, close_series], axis=1).dropna()
+            if len(aligned) < quantiles * 2:
                 return {"error": "数据不足进行分层"}
-            
-            factor_col = aligned_data.columns[0]
-            price_col = aligned_data.columns[1]
-            
-            # 计算收益率
-            returns = aligned_data[price_col].pct_change().dropna()
-            
-            results = {}
-            
-            # 分层回测
-            for i in range(len(aligned_data) - 1):
-                current_data = aligned_data.iloc[i]
-                next_return = returns.iloc[i] if i < len(returns) else 0
-                
-                # 因子分层
-                factor_value = current_data[factor_col]
-                
-                # 这里简化处理，实际应该基于rolling window进行分层
-                # 假设因子值越高，下期收益越高
-                if pd.notna(factor_value) and pd.notna(next_return):
-                    timestamp = aligned_data.index[i]
-                    
-                    if timestamp not in results:
-                        results[timestamp] = {
-                            'factor_value': factor_value,
-                            'next_return': next_return
-                        }
-            
-            # 计算分层表现
-            factor_returns_df = pd.DataFrame(results).T
-            
-            if len(factor_returns_df) == 0:
+
+            # 计算下期收益
+            close_ret = aligned["close"].pct_change()
+            next_return = close_ret.shift(-1)
+            tmp = pd.concat([aligned["factor"], next_return.rename("next_return")], axis=1).dropna()
+            if tmp.empty:
                 return {"error": "无有效数据"}
             
-            # 按因子值分层
-            factor_returns_df['quantile'] = pd.qcut(
-                factor_returns_df['factor_value'], 
-                q=quantiles, 
+            # 分层
+            tmp['quantile'] = pd.qcut(
+                tmp['factor'],
+                q=min(quantiles, tmp['factor'].nunique()),  # 防止唯一值过少报错
                 labels=False,
                 duplicates='drop'
             )
             
             # 计算各层收益率
             quantile_stats = {}
-            for q in range(quantiles):
-                q_data = factor_returns_df[factor_returns_df['quantile'] == q]
+            uniq_q = sorted(tmp['quantile'].dropna().unique().tolist())
+            for q in uniq_q:
+                q_data = tmp[tmp['quantile'] == q]
                 if len(q_data) > 0:
-                    q_returns = pd.Series(q_data['next_return'].values)
-                    quantile_stats[f'Q{q+1}'] = {
-                        'mean_return': q_returns.mean(),
-                        'std_return': q_returns.std(),
+                    q_returns = pd.Series(q_data['next_return'].values, dtype=float)
+                    quantile_stats[f'Q{int(q)+1}'] = {
+                        'mean_return': float(q_returns.mean()),
+                        'std_return': float(q_returns.std(ddof=1)) if len(q_returns) > 1 else 0.0,
                         'sharpe_ratio': self.performance_analyzer.calculate_sharpe_ratio(q_returns),
-                        'total_return': (1 + q_returns).prod() - 1,
-                        'count': len(q_returns)
+                        'total_return': float((1 + q_returns).prod() - 1),
+                        'count': int(len(q_returns))
                     }
             
-            # 多空组合
-            if long_short and len(quantile_stats) >= 2:
+            # 多空组合（最高分位 - 最低分位）
+            if long_short and len(uniq_q) >= 2:
                 try:
-                    high_q = factor_returns_df[factor_returns_df['quantile'] == quantiles - 1]
-                    low_q = factor_returns_df[factor_returns_df['quantile'] == 0]
-                    
+                    high_q_val = max(uniq_q)
+                    low_q_val = min(uniq_q)
+                    high_q = tmp[tmp['quantile'] == high_q_val]
+                    low_q = tmp[tmp['quantile'] == low_q_val]
                     if len(high_q) > 0 and len(low_q) > 0:
-                        ls_returns = pd.Series(high_q['next_return'].values) - pd.Series(low_q['next_return'].values)
+                        min_len = min(len(high_q), len(low_q))
+                        h = pd.Series(high_q['next_return'].values[:min_len], dtype=float)
+                        l = pd.Series(low_q['next_return'].values[:min_len], dtype=float)
+                        ls_returns = pd.Series(h.values - l.values, dtype=float)
                         quantile_stats['LongShort'] = {
-                            'mean_return': ls_returns.mean(),
-                            'std_return': ls_returns.std(),
+                            'mean_return': float(ls_returns.mean()),
+                            'std_return': float(ls_returns.std(ddof=1)) if len(ls_returns) > 1 else 0.0,
                             'sharpe_ratio': self.performance_analyzer.calculate_sharpe_ratio(ls_returns),
-                            'total_return': (1 + ls_returns).prod() - 1,
-                            'count': len(ls_returns)
+                            'total_return': float((1 + ls_returns).prod() - 1),
+                            'count': int(len(ls_returns))
                         }
                 except Exception as e:
                     self.logger.warning(f"计算多空组合失败: {e}")
             
             return {
                 'quantile_stats': quantile_stats,
-                'factor_ic': factor_returns_df[['factor_value', 'next_return']].corr().iloc[0, 1]
+                'factor_ic': float(tmp[['factor', 'next_return']].corr().iloc[0, 1]) if len(tmp) > 1 else np.nan
             }
-            
         except Exception as e:
             self.logger.error(f"分层回测失败: {e}")
             return {"error": str(e)}
-    
+
     def _simple_factor_strategy(self, factor_value: float, prices: Dict, day: int) -> float:
         """
         简单因子策略
@@ -262,16 +272,16 @@ class BacktestEngine:
         Returns:
             交易信号 (1: 买入, -1: 卖出, 0: 无操作)
         """
-        if pd.isna(factor_value):
-            return 0
-        
-        # 简单策略：因子值大于0买入，小于0卖出
-        if factor_value > 0.02:  # 因子值阈值
-            return 1
-        elif factor_value < -0.02:
-            return -1
+        # 强制标量化，避免 Series 比较导致歧义
+        fv = self._to_float_scalar(factor_value, np.nan)
+        if not np.isfinite(fv):
+            return 0.0
+        if fv > 0.02:
+            return 1.0
+        elif fv < -0.02:
+            return -1.0
         else:
-            return 0
+            return 0.0
     
     def _execute_trade(self, symbol: str, signal: float, price: float, timestamp: pd.Timestamp):
         """执行交易"""
@@ -405,4 +415,4 @@ class BacktestEngine:
             
         except Exception as e:
             self.logger.error(f"计算交易统计失败: {e}")
-            return {} 
+            return {}

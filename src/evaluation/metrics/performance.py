@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 from src.utils.logger import get_logger
+from typing import Union, Sequence
 
 
 class PerformanceAnalyzer:
@@ -14,6 +15,20 @@ class PerformanceAnalyzer:
     
     def __init__(self):
         self.logger = get_logger("performance_analyzer")
+
+    def _to_series(self, returns: Union[pd.Series, np.ndarray, Sequence[float]]) -> pd.Series:
+        try:
+            if returns is None:
+                return pd.Series(dtype=float)
+            if isinstance(returns, pd.Series):
+                s = returns
+            else:
+                s = pd.Series(returns, dtype=float)
+            # 清理无穷与缺失
+            return s.astype(float).replace([np.inf, -np.inf], np.nan).dropna()
+        except Exception:
+            # 回退为空
+            return pd.Series(dtype=float)
     
     def calculate_returns(self, prices: pd.Series) -> pd.Series:
         """计算收益率"""
@@ -25,35 +40,27 @@ class PerformanceAnalyzer:
     
     def calculate_sharpe_ratio(
         self, 
-        returns: pd.Series, 
+        returns: Union[pd.Series, np.ndarray, Sequence[float]], 
         risk_free_rate: float = 0.02,
         periods_per_year: int = 252
     ) -> float:
-        """
-        计算夏普比率
-        
-        Args:
-            returns: 收益率序列
-            risk_free_rate: 无风险收益率（年化）
-            periods_per_year: 年化周期数
-        """
         try:
-            if len(returns) == 0:
+            r = self._to_series(returns)
+            if r.empty:
                 return np.nan
-            
-            # 年化收益率
-            annual_return = returns.mean() * periods_per_year
-            
-            # 年化波动率
-            annual_volatility = returns.std() * np.sqrt(periods_per_year)
-            
-            if annual_volatility == 0:
+
+            # 使用标准差（样本）并做健壮性检查
+            std = r.std(ddof=1)
+            if not np.isfinite(std) or std == 0:
                 return np.nan
-            
-            # 夏普比率
+
+            annual_return = r.mean() * periods_per_year
+            annual_volatility = std * np.sqrt(periods_per_year)
+            if not np.isfinite(annual_volatility) or annual_volatility == 0:
+                return np.nan
+
             sharpe = (annual_return - risk_free_rate) / annual_volatility
-            return sharpe
-            
+            return float(sharpe)
         except Exception as e:
             self.logger.error(f"计算夏普比率失败: {e}")
             return np.nan
@@ -315,7 +322,7 @@ class PerformanceAnalyzer:
     
     def comprehensive_analysis(
         self, 
-        returns: pd.Series,
+        returns: Union[pd.Series, np.ndarray, Sequence[float]],
         benchmark_returns: Optional[pd.Series] = None,
         risk_free_rate: float = 0.02,
         periods_per_year: int = 252
@@ -333,21 +340,22 @@ class PerformanceAnalyzer:
             综合分析结果字典
         """
         try:
-            if len(returns) == 0:
+            r = self._to_series(returns)
+            if r.empty:
                 return {}
-            
+
             # 基础统计
-            total_return = self.calculate_cumulative_returns(returns).iloc[-1]
-            annual_return = returns.mean() * periods_per_year
-            volatility = self.calculate_volatility(returns, periods_per_year)
+            total_return = self.calculate_cumulative_returns(r).iloc[-1]
+            annual_return = r.mean() * periods_per_year
+            volatility = self.calculate_volatility(r, periods_per_year)
             
             # 风险调整指标
-            sharpe = self.calculate_sharpe_ratio(returns, risk_free_rate, periods_per_year)
-            sortino = self.calculate_sortino_ratio(returns, risk_free_rate, periods_per_year)
-            calmar = self.calculate_calmar_ratio(returns, periods_per_year)
+            sharpe = self.calculate_sharpe_ratio(r, risk_free_rate, periods_per_year)
+            sortino = self.calculate_sortino_ratio(r, risk_free_rate, periods_per_year)
+            calmar = self.calculate_calmar_ratio(r, periods_per_year)
             
             # 回撤分析
-            drawdown_info = self.calculate_max_drawdown(returns)
+            drawdown_info = self.calculate_max_drawdown(r)
             
             # 分布特征
             skewness = self.calculate_skewness(returns)
@@ -381,8 +389,8 @@ class PerformanceAnalyzer:
             # 如果提供了基准，计算相对指标
             if benchmark_returns is not None:
                 try:
-                    ir = self.calculate_information_ratio(returns, benchmark_returns)
-                    beta = self.calculate_beta(returns, benchmark_returns)
+                    ir = self.calculate_information_ratio(r, benchmark_returns)
+                    beta = self.calculate_beta(r, benchmark_returns)
                     
                     results.update({
                         'information_ratio': ir,

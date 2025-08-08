@@ -218,6 +218,42 @@ class ExchangeCollector(BaseDataCollector):
         except Exception as e:
             self.logger.error(f"获取24小时统计失败: {e}")
             return {}
+        
+    async def health_check(self) -> Dict:
+        """健康检查，返回与 HealthResponse 模型一致的字段"""
+        try:
+            connected = await self.connect()
+
+            symbols_count = 0
+            if connected and self.exchange:
+                try:
+                    # 确保已加载 markets
+                    if not getattr(self.exchange, "markets", None):
+                        await self.exchange.load_markets()
+                    markets = getattr(self.exchange, "markets", {}) or {}
+                    symbols_count = sum(1 for m in markets.values() if m.get("active", True))
+                except Exception as e:
+                    self.logger.warning(f"统计交易对数量失败: {e}")
+
+            return {
+                "status": "healthy" if connected else "unhealthy",
+                "name": self.name,
+                "connected": bool(connected),
+                "symbols_count": int(symbols_count),
+                "timestamp": datetime.now(),
+                "error": None if connected else "连接失败"
+            }
+
+        except Exception as e:
+            self.logger.error(f"健康检查失败: {e}")
+            return {
+                "status": "error",
+                "name": self.name,
+                "connected": False,
+                "symbols_count": 0,
+                "timestamp": datetime.now(),
+                "error": str(e)
+            }
 
 
 class BinanceCollector(ExchangeCollector):
@@ -294,6 +330,27 @@ class MultiExchangeCollector:
         
         self.logger.error(f"所有交易所都无法获取 {symbol} 数据")
         return pd.DataFrame()
+    
+    async def get_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str,
+        since: Optional[datetime] = None,
+        limit: Optional[int] = 1000,
+        exchange: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        兼容性方法：为脚本提供 get_ohlcv 接口
+        - 指定 exchange 时转发到对应采集器
+        - 未指定时使用最优数据源
+        """
+        if exchange:
+            if exchange not in self.collectors:
+                self.logger.error(f"不支持的交易所: {exchange}")
+                return pd.DataFrame()
+            return await self.collectors[exchange].get_ohlcv(symbol, timeframe, since, limit)
+        return await self.get_ohlcv_from_best_source(symbol, timeframe, since, limit)
+
     
     async def health_check_all(self) -> Dict:
         """所有交易所健康检查"""

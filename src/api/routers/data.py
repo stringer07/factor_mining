@@ -102,7 +102,7 @@ async def get_ohlcv_data(request: OHLCVRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/ticker/{symbol}")
+@router.get("/ticker/{symbol:path}")
 async def get_ticker(
     symbol: str,
     exchange: str = Query("binance", description="交易所名称")
@@ -130,7 +130,7 @@ async def get_ticker(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/stats/{symbol}")
+@router.get("/stats/{symbol:path}")
 async def get_24h_stats(
     symbol: str,
     exchange: str = Query("binance", description="交易所名称")
@@ -158,7 +158,7 @@ async def get_24h_stats(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/orderbook/{symbol}")
+@router.get("/orderbook/{symbol:path}")
 async def get_orderbook(
     symbol: str,
     exchange: str = Query("binance", description="交易所名称"),

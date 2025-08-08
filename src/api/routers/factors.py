@@ -82,66 +82,6 @@ async def get_factor_info(factor_name: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/calculate/{factor_name}")
-async def calculate_factor(
-    factor_name: str,
-    symbol: str = Query(..., description="交易对符号"),
-    timeframe: str = Query("1h", description="时间周期"),
-    limit: int = Query(1000, description="数据条数")
-):
-    """计算指定因子的值"""
-    try:
-        # 获取因子
-        factor = factor_registry.get_factor(factor_name)
-        if not factor:
-            raise HTTPException(status_code=404, detail=f"未找到因子: {factor_name}")
-        
-        # 获取市场数据
-        df = await collector.get_ohlcv_from_best_source(
-            symbol=symbol,
-            timeframe=timeframe,
-            limit=limit
-        )
-        
-        if df.empty:
-            raise HTTPException(status_code=404, detail="未找到市场数据")
-        
-        # 计算因子值
-        factor_values = factor.calculate_with_validation(df)
-        
-        if factor_values.empty:
-            raise HTTPException(status_code=500, detail="因子计算失败")
-        
-        # 转换为响应格式
-        result_data = []
-        for timestamp, value in factor_values.items():
-            if pd.notna(value):  # 过滤NaN值
-                result_data.append({
-                    "timestamp": timestamp.isoformat(),
-                    "value": float(value)
-                })
-        
-        return {
-            "factor_name": factor_name,
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "data": result_data,
-            "count": len(result_data),
-            "statistics": {
-                "mean": float(factor_values.mean()) if not factor_values.empty else None,
-                "std": float(factor_values.std()) if not factor_values.empty else None,
-                "min": float(factor_values.min()) if not factor_values.empty else None,
-                "max": float(factor_values.max()) if not factor_values.empty else None
-            }
-        }
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"计算因子失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @router.post("/calculate/batch")
 async def calculate_factors_batch(
     factor_names: List[str],
@@ -221,3 +161,62 @@ async def calculate_factors_batch(
     except Exception as e:
         logger.error(f"批量计算因子失败: {e}")
         raise HTTPException(status_code=500, detail=str(e)) 
+    
+@router.post("/calculate/{factor_name}")
+async def calculate_factor(
+    factor_name: str,
+    symbol: str = Query(..., description="交易对符号"),
+    timeframe: str = Query("1h", description="时间周期"),
+    limit: int = Query(1000, description="数据条数")
+):
+    """计算指定因子的值"""
+    try:
+        # 获取因子
+        factor = factor_registry.get_factor(factor_name)
+        if not factor:
+            raise HTTPException(status_code=404, detail=f"未找到因子: {factor_name}")
+        
+        # 获取市场数据
+        df = await collector.get_ohlcv_from_best_source(
+            symbol=symbol,
+            timeframe=timeframe,
+            limit=limit
+        )
+        
+        if df.empty:
+            raise HTTPException(status_code=404, detail="未找到市场数据")
+        
+        # 计算因子值
+        factor_values = factor.calculate_with_validation(df)
+        
+        if factor_values.empty:
+            raise HTTPException(status_code=500, detail="因子计算失败")
+        
+        # 转换为响应格式
+        result_data = []
+        for timestamp, value in factor_values.items():
+            if pd.notna(value):  # 过滤NaN值
+                result_data.append({
+                    "timestamp": timestamp.isoformat(),
+                    "value": float(value)
+                })
+        
+        return {
+            "factor_name": factor_name,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "data": result_data,
+            "count": len(result_data),
+            "statistics": {
+                "mean": float(factor_values.mean()) if not factor_values.empty else None,
+                "std": float(factor_values.std()) if not factor_values.empty else None,
+                "min": float(factor_values.min()) if not factor_values.empty else None,
+                "max": float(factor_values.max()) if not factor_values.empty else None
+            }
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"计算因子失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

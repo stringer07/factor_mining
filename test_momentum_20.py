@@ -216,7 +216,7 @@ class Momentum20Tester:
             if quantile_stats:
                 print("\n   各分位数表现:")
                 for quantile, stats in quantile_stats.items():
-                    avg_return = stats.get('avg_return', 0)
+                    avg_return = stats.get('mean_return', 0)  # 修正 key
                     count = stats.get('count', 0)
                     print(f"     {quantile}: 平均收益={avg_return:.4f}, 样本数={count}")
             
@@ -413,6 +413,16 @@ class Momentum20Tester:
         except Exception as e:
             print(f"❌ 测试过程中出现错误: {e}")
             raise
+        
+        finally:
+            # 确保释放交易所连接（兼容不同实现）
+            try:
+                if hasattr(self.data_collector, "close"):
+                    await self.data_collector.close()
+                elif hasattr(self.data_collector, "disconnect_all"):
+                    await self.data_collector.disconnect_all()
+            except Exception as _e:
+                print(f"⚠️  断开交易所连接时出现问题: {_e}")
 
 
 async def main():
