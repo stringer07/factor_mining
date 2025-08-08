@@ -3,7 +3,7 @@
 支持主流交易所的数据采集
 """
 
-import ccxt
+import ccxt.async_support as ccxt
 import asyncio
 import pandas as pd
 from typing import Dict, List, Optional
