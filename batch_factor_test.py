@@ -22,6 +22,12 @@ from src.evaluation.metrics.ic_analysis import ICAnalyzer
 from src.evaluation.metrics.performance import PerformanceAnalyzer
 import src.factors.technical  # 触发因子注册
 
+import asyncio
+from typing import List, Dict
+from src.data.collectors.exchange import MultiExchangeCollector
+# 改：引入 Optional
+from typing import Optional
+
 
 class BatchFactorTester:
     """批量因子测试器"""
@@ -39,6 +45,45 @@ class BatchFactorTester:
         
         print(f"🎯 批量因子测试器初始化完成")
         print(f"📁 结果保存目录: {self.results_dir.absolute()}")
+
+    async def _load_market_data(self, symbols: List[str], days: int = 200, timeframe: str = "1d") -> Dict[str, pd.DataFrame]:
+        collector = MultiExchangeCollector()
+        data_map: Dict[str, pd.DataFrame] = {}
+        try:
+            for sym in symbols:
+                df = None
+                # 兼容不同方法名
+                if hasattr(collector, "fetch_ohlcv"):
+                    df = await collector.fetch_ohlcv(symbol=sym, timeframe=timeframe, limit=days)
+                elif hasattr(collector, "get_ohlcv"):
+                    df = await collector.get_ohlcv(symbol=sym, timeframe=timeframe, limit=days)
+                elif hasattr(collector, "fetch"):
+                    df = await collector.fetch(symbol=sym, timeframe=timeframe, limit=days)
+                if df is None or len(df) == 0:
+                    print(f"⚠️ 未获取到数据: {sym}")
+                    continue
+                # 规范列名
+                df = df.copy()
+                if not isinstance(df.index, pd.DatetimeIndex):
+                    df.index = pd.to_datetime(df.index)
+                df = df.sort_index()
+                df.columns = [str(c).strip().lower() for c in df.columns]
+                need = ["open", "high", "low", "close", "volume"]
+                missing = [c for c in need if c not in df.columns]
+                if missing:
+                    print(f"⚠️ {sym} 缺少列 {missing}，跳过")
+                    continue
+                data_map[sym] = df[need]
+            return data_map
+        finally:
+            # 确保释放连接
+            try:
+                if hasattr(collector, "disconnect_all"):
+                    await collector.disconnect_all()
+                elif hasattr(collector, "close"):
+                    await collector.close()
+            except Exception as e:
+                print(f"⚠️ 断开交易所连接异常: {e}")
     
     def create_test_data(self, days: int = 200, with_trend: bool = True) -> pd.DataFrame:
         """创建测试数据"""
@@ -316,58 +361,76 @@ class BatchFactorTester:
             'total_checks': total_checks
         }
     
-    def run_batch_test(self, factor_filter: str = None, save_results: bool = True) -> pd.DataFrame:
-        """运行批量测试"""
-        print("🚀 开始批量因子测试")
+    # 合并：统一的批量测试（use_real 决定数据来源）
+    def run_batch_test(
+        self,
+        use_real: bool = False,
+        symbols: Optional[List[str]] = None,
+        days: int = 200,
+        timeframe: str = "1d",
+        factor_filter: str = None,
+        save_results: bool = True
+    ) -> pd.DataFrame:
+        """运行批量测试（支持合成/真实数据）"""
+        title = "批量因子测试（真实数据）" if use_real else "批量因子测试（合成数据）"
+        print(f"🚀 开始{title}")
         print("=" * 60)
         
-        # 获取所有因子
-        all_factors = factor_registry.list_factors()
+        # 1) 准备数据
+        if use_real:
+            symbols = symbols or ["BTC/USDT", "ETH/USDT"]
+            data_map = asyncio.run(self._load_market_data(symbols, days=days, timeframe=timeframe))
+            if not data_map:
+                print("❌ 未获取到任何真实数据")
+                return pd.DataFrame()
+        else:
+            test_data = self.create_test_data(days=days, with_trend=True)
+            data_map = {"SYNTH": test_data}
         
-        # 过滤因子
+        # 2) 获取与过滤因子
+        all_factors = factor_registry.list_factors()
         if factor_filter:
             test_factors = [f for f in all_factors if factor_filter.lower() in f.lower()]
             print(f"🔍 过滤条件: {factor_filter}")
         else:
             test_factors = all_factors
         
-        print(f"📋 待测试因子数量: {len(test_factors)}")
+        print(f"📋 待测试因子数量: {len(test_factors)} | 数据源条目: {len(data_map)}")
         
-        # 创建测试数据
-        test_data = self.create_test_data(days=200, with_trend=True)
-        
-        # 批量测试
+        # 3) 批量测试（逐数据源×因子）
         self.test_results = []
-        successful_tests = 0
+        successful = 0
+        total_tasks = len(test_factors) * len(data_map)
+        idx = 0
         
-        for i, factor_name in enumerate(test_factors, 1):
-            print(f"\n🧪 [{i}/{len(test_factors)}] 测试因子: {factor_name}")
-            
-            result = self.test_single_factor(factor_name, test_data)
-            self.test_results.append(result)
-            
-            if "error" not in result:
-                successful_tests += 1
-                score = result['score_result']['final_score']
-                rating = result['score_result']['overall_rating']
-                print(f"   ✅ 完成 - 评分: {score:.3f} ({rating})")
-            else:
-                print(f"   ❌ 失败 - {result['error']}")
+        for sym, df in data_map.items():
+            for factor_name in test_factors:
+                idx += 1
+                print(f"\n🧪 [{idx}/{total_tasks}] {sym} | 因子: {factor_name}")
+                result = self.test_single_factor(factor_name, df)
+                if "error" not in result:
+                    result["symbol"] = sym  # 标记来源
+                self.test_results.append(result)
+                
+                if "error" not in result:
+                    successful += 1
+                    score = result['score_result']['final_score']
+                    rating = result['score_result']['overall_rating']
+                    print(f"   ✅ 完成 - 评分: {score:.3f} ({rating})")
+                else:
+                    print(f"   ❌ 失败 - {result['error']}")
         
         print(f"\n📊 测试总结:")
-        print(f"   总因子数: {len(test_factors)}")
-        print(f"   成功测试: {successful_tests}")
-        print(f"   失败测试: {len(test_factors) - successful_tests}")
+        print(f"   总任务数: {total_tasks}")
+        print(f"   成功测试: {successful}")
+        print(f"   失败测试: {total_tasks - successful}")
         
-        # 生成汇总结果
+        # 4) 生成汇总与保存
         self._generate_summary()
-        
-        # 保存结果
         if save_results:
             self._save_results()
-        
         return self.summary_results
-    
+
     def _generate_summary(self):
         """生成汇总结果"""
         summary_data = []
@@ -376,9 +439,10 @@ class BatchFactorTester:
             if "error" in result:
                 continue
             
-            # 提取关键指标
             row = {
                 'factor_name': result['factor_name'],
+                # 新增：来源品种（合成数据时为 SYNTH）
+                'symbol': result.get('symbol', ''),
                 'description': result['factor_description'],
                 'category': result['factor_category'],
                 'sub_category': result['factor_sub_category'],
@@ -394,12 +458,9 @@ class BatchFactorTester:
                 'long_short_return': result['backtest_result'].get('long_short_return', 0),
                 'test_timestamp': result['test_timestamp']
             }
-            
             summary_data.append(row)
         
         self.summary_results = pd.DataFrame(summary_data)
-        
-        # 按评分排序
         if not self.summary_results.empty:
             self.summary_results = self.summary_results.sort_values('final_score', ascending=False)
     
@@ -527,30 +588,30 @@ def main():
     print("用途: 自动测试所有因子并生成评估报告")
     print()
     
-    # 创建测试器
     tester = BatchFactorTester()
     
-    # 菜单选择
     while True:
         print("\n📋 请选择操作:")
-        print("1. 运行批量测试 (所有因子)")
-        print("2. 运行批量测试 (按类别过滤)")
+        print("1. 运行批量测试 (合成数据)")
+        print("2. 运行批量测试 (按类别过滤, 合成数据)")
         print("3. 查看最佳因子")
         print("4. 查看因子详情")
         print("5. 加载之前的结果")
+        # 新增：真实数据入口
+        print("6. 运行批量测试（真实数据）")
         print("0. 退出")
         
-        choice = input("\n请输入选项 (0-5): ").strip()
+        choice = input("\n请输入选项 (0-6): ").strip()
         
         if choice == "0":
             print("👋 再见!")
             break
         elif choice == "1":
-            tester.run_batch_test()
+            tester.run_batch_test(use_real=False)
             tester.get_top_factors(n=10)
         elif choice == "2":
             filter_text = input("请输入过滤条件 (如 momentum, volatility): ").strip()
-            tester.run_batch_test(factor_filter=filter_text)
+            tester.run_batch_test(use_real=False, factor_filter=filter_text)
             tester.get_top_factors(n=10)
         elif choice == "3":
             n = int(input("显示前几名 (默认10): ") or "10")
@@ -562,9 +623,17 @@ def main():
         elif choice == "5":
             tester.load_previous_results()
             print(f"已加载 {len(tester.summary_results)} 个因子的结果")
+        elif choice == "6":
+            syms = input("请输入交易对(逗号分隔，默认: BTC/USDT,ETH/USDT): ").strip() or "BTC/USDT,ETH/USDT"
+            symbols = [s.strip() for s in syms.split(",") if s.strip()]
+            days = int(input("历史天数 (默认180): ").strip() or "180")
+            timeframe = input("时间周期 (默认1d): ").strip() or "1d"
+            filt = input("因子过滤(可空): ").strip() or None
+            tester.run_batch_test(use_real=True, symbols=symbols, days=days, timeframe=timeframe, factor_filter=filt)
+            tester.get_top_factors(n=10)
         else:
             print("⚠️ 无效选项，请重新选择")
 
 
 if __name__ == "__main__":
-    main() 
+    main()
