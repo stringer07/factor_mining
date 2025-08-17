@@ -6,6 +6,7 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime
+import talib as ta
 from ..base.factor import TechnicalFactor, FactorMetadata, factor_registry
 
 
@@ -38,7 +39,7 @@ class MomentumFactor(TechnicalFactor):
 
 class RSIMomentumFactor(TechnicalFactor):
     """RSI动量因子"""
-    
+
     def __init__(self, window: int = 14):
         metadata = FactorMetadata(
             name=f"rsi_momentum_{window}",
@@ -52,31 +53,15 @@ class RSIMomentumFactor(TechnicalFactor):
         )
         super().__init__(metadata)
         self.window = window
-    
+
     def calculate(self, data: pd.DataFrame, **kwargs) -> pd.Series:
         """计算RSI动量因子"""
-        close = data['close']
-        
-        # 计算价格变化
-        delta = close.diff()
-        
-        # 分离上涨和下跌
-        gain = delta.where(delta > 0, 0)
-        loss = -delta.where(delta < 0, 0)
-        
-        # 计算平均增益和损失
-        avg_gain = gain.rolling(window=self.window).mean()
-        avg_loss = loss.rolling(window=self.window).mean()
-        
-        # 计算RSI
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        
-        # RSI动量：当前RSI与前一期RSI的差值
-        rsi_momentum = rsi.diff()
-        
-        return rsi_momentum.fillna(0)
+        close = data['close'].values
+        rsi = ta.RSI(close, timeperiod=self.window)
 
+        rsi_momentum = np.diff(rsi, prepend=np.nan)
+
+        return pd.Series(rsi_momentum, index=data.index)
 
 class MACDMomentumFactor(TechnicalFactor):
     """MACD动量因子"""
@@ -104,7 +89,7 @@ class MACDMomentumFactor(TechnicalFactor):
         # 计算EMA
         ema_fast = close.ewm(span=self.fast).mean()
         ema_slow = close.ewm(span=self.slow).mean()
-        
+
         # 计算MACD线
         macd_line = ema_fast - ema_slow
         
@@ -115,6 +100,32 @@ class MACDMomentumFactor(TechnicalFactor):
         macd_histogram = macd_line - signal_line
         
         return macd_histogram.fillna(0)
+    
+class MACDMomentumFactorTA(TechnicalFactor):
+    """MACD动量因子（使用TA-Lib）"""
+
+    def __init__(self, fast: int = 12, slow: int = 26, signal: int = 9):
+        metadata = FactorMetadata(
+            name=f"macd_momentum_{fast}_{slow}_{signal}_ta",
+            description=f"MACD动量因子 ({fast},{slow},{signal})（使用TA-Lib）",
+            category="technical",
+            sub_category="momentum",
+            calculation_window=slow + signal,
+            update_frequency="1d",
+            data_requirements=["close"],
+            author="Factor Mining System"
+        )
+        super().__init__(metadata)
+        self.fast = fast
+        self.slow = slow
+        self.signal = signal
+
+    def calculate(self, data: pd.DataFrame, **kwargs) -> pd.Series:
+        """计算MACD动量因子（使用TA-Lib）"""
+        close = data['close'].values
+        macd, signal, hist = ta.MACD(close, fastperiod=self.fast, slowperiod=self.slow, signalperiod=self.signal)
+
+        return pd.Series(hist, index=data.index)
 
 
 class VolumeMomentumFactor(TechnicalFactor):
@@ -253,6 +264,7 @@ def register_momentum_factors():
         MomentumFactor(60),
         RSIMomentumFactor(14),
         MACDMomentumFactor(),
+        MACDMomentumFactorTA(),
         VolumeMomentumFactor(20),
         PriceVolumeMomentumFactor(20),
         AccelerationFactor(10),
